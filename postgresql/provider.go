@@ -2,7 +2,6 @@ package postgresql
 
 import (
 	"fmt"
-
 	"github.com/blang/semver"
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/terraform/helper/schema"
@@ -81,6 +80,12 @@ func Provider() terraform.ResourceProvider {
 				Description:  "Specify the expected version of PostgreSQL.",
 				ValidateFunc: validateExpectedVersion,
 			},
+			"ssh_tunnel": {
+				Type:        schema.TypeMap,
+				Optional:    true,
+				Default:     nil,
+				Description: "",
+			},
 		},
 
 		ResourcesMap: map[string]*schema.Resource{
@@ -130,9 +135,21 @@ func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 	versionStr := d.Get("expected_version").(string)
 	version, _ := semver.Parse(versionStr)
 
+	dbHost := d.Get("host").(string)
+	dbPort := d.Get("port").(int)
+	var err error
+	sshTunnelConfig, withSSHTunnel := d.Get("ssh_tunnel").(map[string]string)
+
+	if withSSHTunnel {
+		dbHost, dbPort, err = StartSSHTunnel(sshTunnelConfig, dbHost, dbPort)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	config := Config{
-		Host:              d.Get("host").(string),
-		Port:              d.Get("port").(int),
+		Host:              dbHost,
+		Port:              dbPort,
 		Database:          d.Get("database").(string),
 		Username:          d.Get("username").(string),
 		Password:          d.Get("password").(string),
