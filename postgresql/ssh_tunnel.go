@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"golang.org/x/crypto/ssh"
 	"io"
-	"log"
 	"net"
 )
 
@@ -56,52 +55,27 @@ func (tunnel *sshTunnel) forward(localConn net.Conn) {
 	go copyConn(remoteConn, localConn)
 }
 
-func parseConf(conf map[string]string, dbAddr string) (*sshTunnel, error) {
-	//bastion_host - Setting this enables the bastion Host connection. This host will be connected to first, and then the host connection will be made from there.
+func loadConf(conf map[string]string, remoteAddr string) (*sshTunnel, error) {
+	//bastion_host - This host will be connected to first, and then the host connection will be made from there.
 	//bastion_host_key - The public key from the remote host or the signing CA, used to verify the host connection.
-	//bastion_port - The port to use connect to the bastion host. Defaults to the value of the port field.
-	//bastion_user - The user for the connection to the bastion host. Defaults to the value of the user field.
-	//bastion_password - The password we should use for the bastion host. Defaults to the value of the password field.
-	//bastion_private_key
+	//bastion_port - The port to use connect to the bastion host.
+	//bastion_user - The user for the connection to the bastion host.
+	//bastion_password - The password we should use for the bastion host.
+	//bastion_private_key - The private key we should use for the bastion host.
 
-	bastionHost, ok := conf["bastion_host"]
-	if !ok {
-		return nil, errors.New("")
+	bastionAddr, bastionUser, err := getBastionConf(conf)
+	if err != nil {
+		return nil, err
 	}
 
-	bastionPort, ok := conf["bastion_port"]
-	if !ok {
-		return nil, errors.New("")
+	hostKeyValidation, err := getHostKeyCallback(conf)
+	if err != nil {
+		return nil, err
 	}
 
-	bastionAddr := bastionHost + ":" + string(bastionPort)
-
-	bastionUser, ok := conf["bastion_user"]
-	if !ok {
-		return nil, errors.New("")
-	}
-
-	// bastionHostKey, ok := conf["bastion_host_key"]
-
-	bastionPassword, havePassword := conf["bastion_password"]
-	bastionPrivateKey, havePrivateKey := conf["bastion_private_key"]
-
-	var auth []ssh.AuthMethod
-
-	if havePrivateKey {
-		signer, err := ssh.ParsePrivateKey([]byte(bastionPrivateKey))
-		if err != nil {
-			log.Fatalf("unable to parse private key: %v", err)
-		}
-		auth = []ssh.AuthMethod{
-			ssh.PublicKeys(signer),
-		}
-	} else if havePassword {
-		auth = []ssh.AuthMethod{
-			ssh.Password(bastionPassword),
-		}
-	} else {
-		return nil, errors.New("")
+	auth, err := getAuthMethod(conf)
+	if err != nil {
+		return nil, err
 	}
 
 	freeListenAddr, err := net.ResolveTCPAddr("tcp", "localhost:0")
@@ -112,18 +86,77 @@ func parseConf(conf map[string]string, dbAddr string) (*sshTunnel, error) {
 	return &sshTunnel{
 		Local:  freeListenAddr,
 		Server: bastionAddr,
-		Remote: dbAddr,
+		Remote: remoteAddr,
 		Config: &ssh.ClientConfig{
-			User: bastionUser,
-			Auth: auth,
+			User:            bastionUser,
+			Auth:            auth,
+			HostKeyCallback: hostKeyValidation,
 		},
 	}, nil
 }
 
-func StartSSHTunnel(conf map[string]string, dbHost string, dbPort int) (string, int, error) {
-	dbAddr := dbHost + ":" + string(dbPort)
+func getBastionConf(conf map[string]string) (string, string, error) {
+	bastionHost, ok := conf["bastion_host"]
+	if !ok {
+		return "", "", errors.New("bastion_host is a required field in ssh_tunnel block")
+	}
 
-	tunnel, err := parseConf(conf, dbAddr)
+	bastionPort, ok := conf["bastion_port"]
+	if !ok {
+		return "", "", errors.New("bastion_port is a required field in ssh_tunnel block")
+	}
+
+	bastionAddr := bastionHost + ":" + string(bastionPort)
+
+	bastionUser, ok := conf["bastion_user"]
+	if !ok {
+		return "", "", errors.New("bastion_user is a required field in ssh_tunnel block")
+	}
+
+	return bastionAddr, bastionUser, nil
+}
+
+func getAuthMethod(conf map[string]string) ([]ssh.AuthMethod, error) {
+	bastionPassword, havePassword := conf["bastion_password"]
+	bastionPrivateKey, havePrivateKey := conf["bastion_private_key"]
+
+	if havePrivateKey {
+		signer, err := ssh.ParsePrivateKey([]byte(bastionPrivateKey))
+		if err != nil {
+			return nil, err
+		}
+		return []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+		}, nil
+	} else if havePassword {
+		return []ssh.AuthMethod{
+			ssh.Password(bastionPassword),
+		}, nil
+	}
+
+	return nil, errors.New("one of bastion_password or bastion_private_key is required in block ssh_tunnel")
+}
+
+func getHostKeyCallback(conf map[string]string) (ssh.HostKeyCallback, error) {
+	bastionHostKey, haveBastionHostKey := conf["bastion_host_key"]
+
+	if haveBastionHostKey {
+		publicHostKey, err := ssh.ParsePublicKey([]byte(bastionHostKey))
+
+		if err != nil {
+			return nil, err
+		}
+
+		return ssh.FixedHostKey(publicHostKey), nil
+	}
+
+	return ssh.InsecureIgnoreHostKey(), nil
+}
+
+func StartSSHTunnel(conf map[string]string, remoteHost string, remotePort int) (string, int, error) {
+	remoteAddr := remoteHost + ":" + string(remotePort)
+
+	tunnel, err := loadConf(conf, remoteAddr)
 
 	if err != nil {
 		return "", 0, err
